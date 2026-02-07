@@ -1,0 +1,85 @@
+name: Render Video & Deploy to Pages
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint & Type check
+        run: npm run lint
+
+      - name: Render video
+        run: npx remotion render src/index.ts GameHighlight out/game-highlight.mp4
+
+      - name: Prepare Pages artifact
+        run: |
+          mkdir -p _site
+          cp out/game-highlight.mp4 _site/
+          cat > _site/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html lang="ja">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>void2610 Game Highlights</title>
+            <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { background: #0a0a0a; color: #fff; font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+              .container { max-width: 1280px; width: 100%; padding: 2rem; text-align: center; }
+              h1 { font-size: 2rem; margin-bottom: 1rem; color: #a5b4fc; }
+              video { width: 100%; max-width: 1280px; border-radius: 12px; box-shadow: 0 8px 32px rgba(99, 102, 241, 0.3); }
+              p { margin-top: 1rem; color: #6b7280; font-size: 0.875rem; }
+              a { color: #818cf8; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>void2610 Game Highlights</h1>
+              <video controls autoplay muted loop>
+                <source src="game-highlight.mp4" type="video/mp4">
+              </video>
+              <p>Rendered with <a href="https://remotion.dev">Remotion</a> via GitHub Actions</p>
+            </div>
+          </body>
+          </html>
+          HTMLEOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: render
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
