@@ -5,19 +5,18 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, closed]
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
+  contents: write
+  pull-requests: write
+  deployments: write
 
 jobs:
+  # 動画レンダリング（closed以外の全イベント）
   build:
     runs-on: ubuntu-latest
+    if: github.event.action != 'closed'
     outputs:
       has-videos: ${{ steps.detect.outputs.has_videos }}
     steps:
@@ -79,7 +78,7 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Prepare Pages artifact
+      - name: Prepare site
         if: steps.detect.outputs.has_videos == 'true'
         env:
           COMPOSITIONS: ${{ steps.detect.outputs.compositions }}
@@ -90,20 +89,99 @@ jobs:
           done
           node scripts/generate-preview-page.mjs
 
-      - name: Upload Pages artifact
+      - name: Upload artifact
         if: steps.detect.outputs.has_videos == 'true'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
+          name: site
           path: _site
 
-  deploy:
+  # mainブランチへのデプロイ（ルートディレクトリ）
+  deploy-main:
     needs: build
-    if: needs.build.outputs.has-videos == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.outputs.has-videos == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: https://void2610.github.io/remotion-workspace/
+    concurrency:
+      group: pages-deploy-main
+      cancel-in-progress: true
     steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: _site
+
       - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_site
+          keep_files: true
+
+  # PRプレビューデプロイ（pr/<番号>/ サブディレクトリ）
+  deploy-pr:
+    needs: build
+    if: github.event_name == 'pull_request' && github.event.action != 'closed' && needs.build.outputs.has-videos == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pr-preview-${{ github.event.pull_request.number }}
+      url: https://void2610.github.io/remotion-workspace/pr/${{ github.event.pull_request.number }}/
+    concurrency:
+      group: pages-deploy-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: _site
+
+      - name: Deploy PR preview
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_site
+          destination_dir: pr/${{ github.event.pull_request.number }}
+          keep_files: true
+
+  # PRクローズ時にプレビューディレクトリを削除
+  cleanup-pr:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+
+      - name: Remove PR preview directory
+        run: |
+          PR_DIR="pr/${{ github.event.pull_request.number }}"
+          if [ -d "$PR_DIR" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git rm -rf "$PR_DIR"
+            git commit -m "Clean up preview for PR #${{ github.event.pull_request.number }}"
+            git push origin gh-pages
+          else
+            echo "Directory $PR_DIR does not exist, skipping cleanup"
+          fi
+
+      - name: Delete PR environment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const envName = `pr-preview-${{ github.event.pull_request.number }}`;
+            try {
+              await github.rest.repos.deleteAnEnvironment({
+                ...context.repo,
+                environment_name: envName,
+              });
+              console.log(`Deleted environment: ${envName}`);
+            } catch (e) {
+              console.log(`Environment ${envName} not found or already deleted`);
+            }
