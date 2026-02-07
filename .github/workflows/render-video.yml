@@ -2,11 +2,9 @@ name: Render Video & Deploy to Pages
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
@@ -18,10 +16,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  render:
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      has-videos: ${{ steps.detect.outputs.has_videos }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -31,69 +33,72 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Configure Pages
-        uses: actions/configure-pages@v4
-
       - name: Lint & Type check
         run: npm run lint
 
-      - name: Render video
-        run: npx remotion render src/index.ts GameHighlight out/game-highlight.mp4
+      - name: Detect changed compositions
+        id: detect
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} -- src/ public/)
+          else
+            if git rev-parse HEAD~1 >/dev/null 2>&1; then
+              CHANGED=$(git diff --name-only HEAD~1 -- src/ public/)
+            else
+              CHANGED=$(git ls-files -- src/ public/)
+            fi
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED"
+          echo ""
+
+          if [ -n "$CHANGED" ]; then
+            COMPOSITIONS=$(echo "$CHANGED" | node scripts/detect-compositions.mjs)
+          else
+            COMPOSITIONS=""
+          fi
+
+          echo "compositions=$COMPOSITIONS" >> $GITHUB_OUTPUT
+
+          if [ -n "$COMPOSITIONS" ]; then
+            echo "has_videos=true" >> $GITHUB_OUTPUT
+            echo "Will render: $COMPOSITIONS"
+          else
+            echo "has_videos=false" >> $GITHUB_OUTPUT
+            echo "No compositions to render"
+          fi
+
+      - name: Render videos
+        if: steps.detect.outputs.has_videos == 'true'
+        run: |
+          mkdir -p out
+          for comp in ${{ steps.detect.outputs.compositions }}; do
+            echo "::group::Rendering $comp"
+            npx remotion render src/index.ts "$comp" "out/${comp}.mp4"
+            echo "::endgroup::"
+          done
 
       - name: Prepare Pages artifact
+        if: steps.detect.outputs.has_videos == 'true'
+        env:
+          COMPOSITIONS: ${{ steps.detect.outputs.compositions }}
         run: |
           mkdir -p _site
-          cp out/game-highlight.mp4 _site/
-          cat > _site/index.html << 'HTMLEOF'
-          <!DOCTYPE html>
-          <html lang="ja">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>void2610 Game Highlights</title>
-            <style>
-              * { margin: 0; padding: 0; box-sizing: border-box; }
-              body { background: #0a0a0a; color: #fff; font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-              .container { max-width: 1280px; width: 100%; padding: 2rem; text-align: center; }
-              h1 { font-size: 2rem; margin-bottom: 1rem; color: #a5b4fc; }
-              video { width: 100%; max-width: 1280px; border-radius: 12px; box-shadow: 0 8px 32px rgba(99, 102, 241, 0.3); }
-              p { margin-top: 1rem; color: #6b7280; font-size: 0.875rem; }
-              a { color: #818cf8; }
-            </style>
-          </head>
-          <body>
-            <div class="container">
-              <h1>void2610 Game Highlights</h1>
-              <video controls autoplay muted loop>
-                <source src="game-highlight.mp4" type="video/mp4">
-              </video>
-              <p>Rendered with <a href="https://remotion.dev">Remotion</a> via GitHub Actions</p>
-            </div>
-          </body>
-          </html>
-          HTMLEOF
+          for comp in $COMPOSITIONS; do
+            cp "out/${comp}.mp4" _site/
+          done
+          node scripts/generate-preview-page.mjs
 
       - name: Upload Pages artifact
+        if: steps.detect.outputs.has_videos == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
-  setup-pages:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - name: Remove environment branch restrictions
-        run: |
-          curl -s -o /dev/null -w "%{http_code}" -X PUT \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${{ github.repository }}/environments/github-pages" \
-            -d '{"deployment_branch_policy":null}'
-
   deploy:
-    needs: [render, setup-pages]
-    if: github.ref == 'refs/heads/main'
+    needs: build
+    if: needs.build.outputs.has-videos == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
