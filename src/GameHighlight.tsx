@@ -14,7 +14,6 @@ import { loadFont } from "@remotion/google-fonts/NotoSansJP";
 
 const { fontFamily } = loadFont("normal", {
   weights: ["400", "700", "900"],
-  subsets: ["latin", "japanese"],
 });
 
 type GameInfo = {
