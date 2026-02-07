@@ -72,8 +72,8 @@ const GAMES: GameInfo[] = [
     title: "Calm Fishing",
     genre: "Idle Game",
     description: "ピクセルアートの放置系フィッシングゲーム。unity1week参加作品。",
-    image: "games/calm-fishing.png",
-    isGif: false,
+    image: "games/calm-fishing.gif",
+    isGif: true,
   },
   {
     title: "Maouchan",
